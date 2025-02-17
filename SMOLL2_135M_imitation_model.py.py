@@ -32,29 +32,38 @@ class RotaryEmbedding(nn.Module):
         return torch.cat((x1 * cos_emb - x2 * sin_emb, x1 * sin_emb + x2 * cos_emb), dim=-1)
 
 class SelfAttention(nn.Module):
-    def __init__(self, dim):
+    def __init__(self, dim, n_heads=8, num_kv_heads=2):
         super().__init__()
         self.dim = dim
-        self.n_heads = 8
-        self.head_dim = dim // 8
+        self.n_heads = n_heads  # Total number of query heads
+        self.num_kv_heads = num_kv_heads  # Shared key-value heads
+        self.head_dim = dim // n_heads
         
         self.q_proj = nn.Linear(dim, dim)
-        self.k_proj = nn.Linear(dim, dim)
-        self.v_proj = nn.Linear(dim, dim)
+        self.k_proj = nn.Linear(dim, dim * num_kv_heads // n_heads)  # Reduce key projection
+        self.v_proj = nn.Linear(dim, dim * num_kv_heads // n_heads)  # Reduce value projection
         self.o_proj = nn.Linear(dim, dim)
         
         self.rotary_emb = RotaryEmbedding(self.head_dim)
-        
+
     def forward(self, x):
         batch_size, seq_len, _ = x.shape
         
+        # Queries: Full number of heads
         q = self.q_proj(x).view(batch_size, seq_len, self.n_heads, self.head_dim)
-        k = self.k_proj(x).view(batch_size, seq_len, self.n_heads, self.head_dim)
-        v = self.v_proj(x).view(batch_size, seq_len, self.n_heads, self.head_dim)
+        
+        # Keys and Values: Only num_kv_heads heads
+        k = self.k_proj(x).view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
+        v = self.v_proj(x).view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
         
         q = q.transpose(1, 2)  # [batch, n_heads, seq_len, head_dim]
-        k = k.transpose(1, 2)
+        k = k.transpose(1, 2)  # [batch, num_kv_heads, seq_len, head_dim]
         v = v.transpose(1, 2)
+        
+        # Expand k, v to match query heads
+        expand_factor = self.n_heads // self.num_kv_heads
+        k = k.repeat_interleave(expand_factor, dim=1)  # Match query heads
+        v = v.repeat_interleave(expand_factor, dim=1)
         
         # Apply rotary embeddings
         q = self.rotary_emb(q)
@@ -70,7 +79,6 @@ class SelfAttention(nn.Module):
         x = x.view(batch_size, seq_len, -1)
         
         return self.o_proj(x)
-
 class FeedForward(nn.Module):
     def __init__(self, dim, hidden_dim):
         super().__init__()
